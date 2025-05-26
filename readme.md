@@ -1,80 +1,77 @@
-# Network Configuration API Service
+# 网络配置 API 服务
 
-A Flask-based backend API service for managing systemd-networkd network configurations on Ubuntu 22.04.
+一个基于 Flask 的后端 API 服务，用于在 Ubuntu 22.04 上管理 systemd-networkd 网络配置。
 
-## Project Structure
+## 项目结构
 
 ```
 project_root/
-├── app.py                  # Application entry point
-├── config.py               # Configuration settings
-├── models/                 # Data structures
+├── app.py                  # 应用程序入口
+├── config.py               # 配置设置
+├── models/                 # 数据结构
 │   ├── __init__.py
 │   └── network_models.py
-├── routes/                 # API route definitions
+├── routes/                 # API 路由定义
 │   ├── __init__.py
 │   └── network_routes.py
-├── services/               # Business logic
+├── services/               # 业务逻辑
 │   ├── __init__.py
 │   ├── file_service.py
 │   ├── network_service.py
 │   └── system_service.py
-├── utils/                  # Helper utilities
-│   ├── __init__.py
-│   ├── command_executor.py
-│   ├── config_parser.py
-│   └── validators.py
-└── tests/                  # Test files
+├── utils/                  # 辅助工具
     ├── __init__.py
-    └── test_network_routes.py
+    ├── command_executor.py
+    ├── config_parser.py
+    └── validators.py
 ```
 
-## Features
+## 功能
 
-- Discover network interfaces on Ubuntu 22.04 systems
-- Read and parse existing systemd-networkd configuration files
-- Generate and write network configuration files based on JSON input
-- Support for both IPv4 and IPv6 addressing, gateways, DNS servers, and routes
-- Automatic merging of existing system routes with new configurations
-- RESTful API interface for managing network configurations
+- 发现 Ubuntu 22.04 系统上的网络接口
+- 读取和解析现有的 systemd-networkd 配置文件
+- 根据 JSON 输入生成和写入网络配置文件
+- 支持 IPv4 和 IPv6 地址、网关、DNS 服务器和路由
+- 自动将现有系统路由与新配置合并
+- 用于管理网络配置的 RESTful API 接口
 
-## API Endpoints
+## API 端点
 
-- `GET /api/network/interfaces`: Get information about all network interfaces
-- `GET /api/network/interfaces/<interface_name>`: Get detailed information about a specific interface
-- `POST /api/network/interfaces/<interface_name>`: Configure a specific interface (JSON body required)
-- `POST /api/network/reload`: Reload the systemd-networkd service to apply changes
+- `GET /api/network/interfaces`：获取所有网络接口的信息
+- `GET /api/network/interfaces/<interface>`：获取特定接口的详细信息
+- `POST /api/network/interfaces/<interface>`：配置特定接口（需要 JSON 请求体）
+- `POST /api/network/reload`：重新加载 systemd-networkd 服务以应用更改
 
-## Requirements
+## 要求
 
 - Python 3.x
 - Flask
-- Ubuntu 22.04 with systemd-networkd
-- Root privileges (for writing configuration files and reloading services)
+- Ubuntu 22.04 配备 systemd-networkd
+- 根权限（用于写入配置文件和重新加载服务）
 
-## Installation
+## 安装
 
-1. Clone this repository
-2. Create a virtual environment: `python -m venv venv`
-3. Activate the virtual environment: `source venv/bin/activate`
-4. Install dependencies: `pip install flask`
-5. Run the application: `sudo python app.py`
+1. 克隆此仓库
+2. 创建虚拟环境：`python -m venv venv`
+3. 激活虚拟环境：`source venv/bin/activate`
+4. 安装依赖项：`pip install flask`
+5. 运行应用程序：`sudo python app.py`
 
-## Example Requests
+## 示例请求
 
-### Get all interfaces
+### 获取所有接口
 
 ```bash
 curl -X GET http://localhost:8000/api/network/interfaces
 ```
 
-### Get a specific interface
+### 获取特定接口
 
 ```bash
 curl -X GET http://localhost:8000/api/network/interfaces/eth0
 ```
 
-### Configure an interface
+### 配置接口
 
 ```bash
 curl -X POST \
@@ -99,18 +96,18 @@ curl -X POST \
   }'
 ```
 
-### Reload network configuration
+### 重新加载网络配置
 
 ```bash
 curl -X POST http://localhost:8000/api/network/reload
 ```
 
-## Running Tests
+## 运行测试
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-## Security Considerations
+## 安全注意事项
 
-This API service needs to run with elevated privileges to modify network configuration files and restart system services. Consider implementing proper authentication and authorization if deploying in a production environment.
+此 API 服务需要以提升的权限运行，以修改网络配置文件和重启系统服务。如果在生产环境中部署，请考虑实现适当的认证和授权机制。

@@ -2,6 +2,7 @@ import os
 import logging
 from flask import Flask
 from routes.network_routes import network_bp
+from routes.monitor_routes import monitor_bp
 import config
 
 # Configure logging
@@ -19,6 +20,7 @@ def create_app():
 
     # Register blueprints
     app.register_blueprint(network_bp)
+    app.register_blueprint(monitor_bp)  # 新增：注册监控路由
 
     # Error handlers
     @app.errorhandler(404)
@@ -29,6 +31,16 @@ def create_app():
     def server_error(error):
         logger.exception("An error occurred during a request.")
         return {'error': 'Internal server error'}, 500
+
+    # 新增：健康检查路由
+    @app.route('/api/health', methods=['GET'])
+    def health_check():
+        """全局健康检查接口"""
+        return {
+            'status': 'healthy',
+            'services': ['network', 'monitor'],
+            'message': 'Server is running'
+        }, 200
 
     return app
 
