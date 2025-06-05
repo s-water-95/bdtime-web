@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NTP数据包分析工作脚本
+NTP数据包分析工作脚本 (优化版)
 负责单个网卡的NTP数据包捕获和分析
-作为独立进程运行，接收命令行参数
+通过TCP Socket发送会话数据，优化磁盘占用
 """
 
 import subprocess
@@ -14,17 +14,18 @@ import json
 import time
 import os
 import logging
+import socket
+import pickle
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 import argparse
 
-# 配置日志
+# 配置日志 - 修改：只使用stdout，由父进程重定向到日志文件
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('/tmp/ntp_worker.log', mode='a')
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
@@ -32,34 +33,186 @@ logger = logging.getLogger(__name__)
 
 
 class SingleInterfaceNTPAnalyzer:
-    """单网卡NTP分析器 - 专注于单个网卡的监控"""
+    """单网卡NTP分析器 - 专注于单个网卡的监控，通过TCP发送数据"""
 
     def __init__(self, interface: str, port: int = 123, output_file: Optional[str] = None,
-                 pairing_timeout: float = 2.0):
+                 pairing_timeout: float = 2.0, ingestion_host: str = '127.0.0.1',
+                 ingestion_port: int = 10000):
         """
         初始化NTP分析器
 
         Args:
             interface: 网卡名称
             port: NTP端口
-            output_file: 输出文件路径
+            output_file: 输出文件路径（仅用于摘要信息，不包含会话数据）
             pairing_timeout: 配对超时时间
+            ingestion_host: 数据接收服务主机
+            ingestion_port: 数据接收服务端口
         """
         self.interface = interface
         self.port = port
         self.output_file = output_file
         self.pairing_timeout = pairing_timeout
+        self.ingestion_host = ingestion_host
+        self.ingestion_port = ingestion_port
         self.running = False
         self.packet_count = 0
         self.session_count = 0
+        self.sent_sessions_count = 0  # 新增：成功发送的会话计数
 
         # 存储待配对的请求和响应
         self.pending_requests = {}
-        self.completed_sessions = []
         self.unmatched_packets = []
+
+        # TCP连接管理
+        self.tcp_socket = None
+        self.tcp_connected = False
 
         # 网卡信息
         self.interface_info = self.get_interface_info()
+
+    def _connect_to_ingestion_service(self) -> bool:
+        """
+        连接到数据接收服务
+
+        Returns:
+            bool: 连接是否成功
+        """
+        try:
+            if self.tcp_socket:
+                try:
+                    self.tcp_socket.close()
+                except:
+                    pass
+                self.tcp_socket = None
+
+            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_socket.settimeout(5.0)  # 5秒连接超时
+            self.tcp_socket.connect((self.ingestion_host, self.ingestion_port))
+            self.tcp_connected = True
+            logger.info(f"成功连接到数据接收服务 {self.ingestion_host}:{self.ingestion_port}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"连接数据接收服务失败: {e}")
+            self.tcp_connected = False
+            if self.tcp_socket:
+                try:
+                    self.tcp_socket.close()
+                except:
+                    pass
+                self.tcp_socket = None
+            return False
+
+    def _send_session_data(self, session_data: Dict[str, Any]) -> bool:
+        """
+        发送会话数据到数据接收服务
+
+        Args:
+            session_data: 精简的会话数据字典
+
+        Returns:
+            bool: 发送是否成功
+        """
+        if not self.tcp_connected:
+            if not self._connect_to_ingestion_service():
+                return False
+
+        try:
+            # 序列化数据为JSON格式，便于跨语言兼容
+            serialized_data = json.dumps(session_data, ensure_ascii=False)
+            data_with_delimiter = serialized_data + '\n'
+
+            # 发送数据
+            self.tcp_socket.sendall(data_with_delimiter.encode('utf-8'))
+            self.sent_sessions_count += 1
+            logger.debug(f"成功发送会话数据: {session_data['client_ip']}")
+            return True
+
+        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+            logger.warning(f"发送数据失败，尝试重连: {e}")
+            self.tcp_connected = False
+
+            # 尝试重连并重新发送
+            if self._connect_to_ingestion_service():
+                try:
+                    serialized_data = json.dumps(session_data, ensure_ascii=False)
+                    data_with_delimiter = serialized_data + '\n'
+                    self.tcp_socket.sendall(data_with_delimiter.encode('utf-8'))
+                    self.sent_sessions_count += 1
+                    logger.info(f"重连后成功发送会话数据: {session_data['client_ip']}")
+                    return True
+                except Exception as retry_e:
+                    logger.error(f"重连后仍然发送失败: {retry_e}")
+                    return False
+            return False
+
+        except Exception as e:
+            logger.error(f"发送会话数据失败: {e}")
+            return False
+
+    def _extract_session_summary(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        提取会话的精简数据并计算性能指标
+
+        Args:
+            session: 完整的会话数据
+
+        Returns:
+            Dict[str, Any]: 精简的会话数据，包含计算出的性能指标
+        """
+        req = session['request']
+        resp = session['response']
+        req_info = req['packet_info']
+        resp_info = resp['packet_info']
+
+        # 合并NTP数据
+        merged_ntp = self.merge_session_data(req['ntp_info'], resp['ntp_info'])
+
+        # 计算性能指标
+        t1 = merged_ntp.get('originate_timestamp', 0)  # 客户端发送时间
+        t2 = merged_ntp.get('receive_timestamp', 0)  # 服务器接收时间
+        t3 = merged_ntp.get('transmit_timestamp', 0)  # 服务器发送时间
+
+        # 计算网络延迟和处理时间
+        client_to_server_latency = (t2 - t1) if (t1 > 0 and t2 > 0) else None
+        server_processing_time = (t3 - t2) if (t2 > 0 and t3 > 0) else None
+        total_process_time = abs(client_to_server_latency or 0) + (server_processing_time or 0) if (
+                    client_to_server_latency is not None and server_processing_time is not None) else None
+
+        # 构建精简的会话数据
+        session_summary = {
+            'interface_name': self.interface,
+            'client_ip': req_info['src_ip'],
+            'client_port': req_info['src_port'],
+            'server_ip': req_info['dst_ip'],
+            'server_port': req_info['dst_port'],
+            'ntp_version': req_info['ntp_version'],
+            'stratum': merged_ntp.get('stratum', 0),
+            'precision': merged_ntp.get('precision', 0),
+            'root_delay': merged_ntp.get('root_delay', 0.0),
+            'root_dispersion': merged_ntp.get('root_dispersion', 0.0),
+            'reference_id': merged_ntp.get('reference_id', ''),
+            'leap_indicator': merged_ntp.get('leap_indicator', ''),
+            'poll_interval': merged_ntp.get('poll', 0),
+
+            # 时间戳
+            'reference_timestamp': merged_ntp.get('reference_timestamp', 0.0),
+            'originate_timestamp': merged_ntp.get('originate_timestamp', 0.0),
+            'receive_timestamp': merged_ntp.get('receive_timestamp', 0.0),
+            'transmit_timestamp': merged_ntp.get('transmit_timestamp', 0.0),
+
+            # 计算出的性能指标
+            'client_to_server_latency_seconds': client_to_server_latency,
+            'server_processing_time_seconds': server_processing_time,
+            'total_process_time_seconds': total_process_time,
+
+            # 会话元数据
+            'session_timestamp': datetime.now(timezone.utc).isoformat(),
+            'packet_length': req['ntp_info'].get('length', 48)
+        }
+
+        return session_summary
 
     def get_interface_info(self) -> Dict[str, Any]:
         """获取指定网卡的信息"""
@@ -265,8 +418,11 @@ class SingleInterfaceNTPAnalyzer:
                 }
 
                 self.session_count += 1
-                self.completed_sessions.append(session)
                 self.display_paired_session(session)
+
+                # 新增：提取精简数据并发送到数据接收服务
+                session_summary = self._extract_session_summary(session)
+                self._send_session_data(session_summary)
 
             else:
                 # 没有找到对应的请求，记录为未匹配
@@ -501,27 +657,30 @@ class SingleInterfaceNTPAnalyzer:
                 process.terminate()
 
     def save_results(self) -> None:
-        """保存结果"""
+        """
+        保存结果 - 修改：仅保存摘要信息，不包含会话数据
+        """
         if self.output_file:
             try:
                 summary = {
                     'capture_summary': {
                         'interface': self.interface,
                         'total_packets': self.packet_count,
-                        'completed_sessions': len(self.completed_sessions),
+                        'completed_sessions': self.session_count,
+                        'sent_sessions': self.sent_sessions_count,  # 新增：发送成功的会话数
                         'pending_requests': len(self.pending_requests),
                         'unmatched_packets': len(self.unmatched_packets),
-                        'capture_time': datetime.now().isoformat()
+                        'capture_time': datetime.now().isoformat(),
+                        'tcp_connection_status': self.tcp_connected
                     },
                     'interface_info': self.interface_info,
-                    'sessions': self.completed_sessions,
-                    'unmatched_packets': self.unmatched_packets
+                    'unmatched_packets': self.unmatched_packets  # 仅包含未匹配的包
                 }
 
                 with open(self.output_file, 'w', encoding='utf-8') as f:
                     json.dump(summary, f, indent=2, ensure_ascii=False)
 
-                logger.info(f"结果已保存到: {self.output_file}")
+                logger.info(f"结果摘要已保存到: {self.output_file}")
             except Exception as e:
                 logger.error(f"保存失败: {e}")
 
@@ -531,14 +690,18 @@ class SingleInterfaceNTPAnalyzer:
         logger.info(f"监听接口: {self.interface}")
         logger.info(f"目标端口: {self.port}")
         logger.info(f"配对超时: {self.pairing_timeout} 秒")
+        logger.info(f"数据接收服务: {self.ingestion_host}:{self.ingestion_port}")
         if self.output_file:
-            logger.info(f"输出文件: {self.output_file}")
+            logger.info(f"摘要输出文件: {self.output_file}")
 
         # 显示网卡信息
         if self.interface_info['ip_addresses']:
             logger.info("网卡信息:")
             for addr in self.interface_info['ip_addresses']:
                 logger.info(f"  {addr['ip']}/{addr['prefix']} (网络: {addr['network']})")
+
+        # 初始连接到数据接收服务
+        self._connect_to_ingestion_service()
 
         logger.info("等待NTP会话...")
 
@@ -547,10 +710,19 @@ class SingleInterfaceNTPAnalyzer:
         def signal_handler(sig, frame):
             logger.info(f"网卡 {self.interface} 捕获统计:")
             logger.info(f"  总数据包: {self.packet_count}")
-            logger.info(f"  完整会话: {len(self.completed_sessions)}")
+            logger.info(f"  完整会话: {self.session_count}")
+            logger.info(f"  发送成功会话: {self.sent_sessions_count}")
             logger.info(f"  待配对请求: {len(self.pending_requests)}")
             logger.info(f"  未匹配数据包: {len(self.unmatched_packets)}")
             self.save_results()
+
+            # 关闭TCP连接
+            if self.tcp_socket:
+                try:
+                    self.tcp_socket.close()
+                except:
+                    pass
+
             logger.info(f"网卡 {self.interface} 监听已停止")
             sys.exit(0)
 
@@ -563,6 +735,12 @@ class SingleInterfaceNTPAnalyzer:
             pass
         finally:
             self.running = False
+            # 关闭TCP连接
+            if self.tcp_socket:
+                try:
+                    self.tcp_socket.close()
+                except:
+                    pass
 
 
 def main_worker_entry():
@@ -575,8 +753,12 @@ def main_worker_entry():
     # 可选参数
     parser.add_argument('--port', type=int, default=123, help='NTP端口 (默认: 123)')
     parser.add_argument('--timeout', type=float, default=2.0, help='配对超时时间（秒，默认: 2.0）')
-    parser.add_argument('--output', help='保存结果到JSON文件')
+    parser.add_argument('--output', help='保存摘要结果到JSON文件')
     parser.add_argument('--daemon', action='store_true', help='后台运行模式 (内部使用)')
+
+    # 新增：数据接收服务参数
+    parser.add_argument('--ingestion-host', default='127.0.0.1', help='数据接收服务主机 (默认: 127.0.0.1)')
+    parser.add_argument('--ingestion-port', type=int, default=10000, help='数据接收服务端口 (默认: 10000)')
 
     args = parser.parse_args()
 
@@ -585,7 +767,9 @@ def main_worker_entry():
         interface=args.interface,
         port=args.port,
         output_file=args.output,
-        pairing_timeout=args.timeout
+        pairing_timeout=args.timeout,
+        ingestion_host=args.ingestion_host,
+        ingestion_port=args.ingestion_port
     )
     analyzer.start_capture()
 

@@ -113,7 +113,7 @@ class NTPMonitorManager:
             interface: 网卡名称
             port: NTP端口，默认123
             timeout: 配对超时时间，默认2.0秒
-            output_file: 输出文件路径，可选
+            output_file: 输出文件路径（仅用于摘要，不包含会话数据）
 
         Returns:
             Tuple[bool, str]: (成功状态, 消息)
@@ -128,15 +128,18 @@ class NTPMonitorManager:
 
         logger.info(f"启动网卡 {interface} 的NTP监控...")
 
-        # 构建监控进程命令
+        # 修改：构建监控进程命令，使用数据接收服务参数替代输出文件
         cmd = [
             'python3', config.NTP_WORKER_SCRIPT_PATH,
             '--interface', interface,
             '--port', str(port),
             '--timeout', str(timeout),
-            '--daemon'  # 后台运行标志
+            '--daemon',  # 后台运行标志
+            '--ingestion-host', config.NTP_INGESTION_HOST,  # 新增：数据接收服务主机
+            '--ingestion-port', str(config.NTP_INGESTION_PORT)  # 新增：数据接收服务端口
         ]
 
+        # 如果需要摘要输出文件，仍然传递（仅用于调试和统计）
         if output_file:
             cmd.extend(['--output', output_file])
 
@@ -163,7 +166,9 @@ class NTPMonitorManager:
 
             if self.is_monitoring(interface):
                 logger.info(f"网卡 {interface} 监控已启动 (PID: {process.pid})")
-                return True, f"网卡 {interface} 监控已启动，PID: {process.pid}，日志文件: {log_file}"
+                return True, (f"网卡 {interface} 监控已启动，PID: {process.pid}，"
+                              f"数据发送到: {config.NTP_INGESTION_HOST}:{config.NTP_INGESTION_PORT}，"
+                              f"日志文件: {log_file}")
             else:
                 # 检查是否启动失败
                 if log_file.exists():
@@ -245,7 +250,7 @@ class NTPMonitorManager:
             interface: 网卡名称
             port: NTP端口，默认123
             timeout: 配对超时时间，默认2.0秒
-            output_file: 输出文件路径，可选
+            output_file: 输出文件路径（仅用于摘要，不包含会话数据）
 
         Returns:
             Tuple[bool, str]: (成功状态, 消息)
@@ -281,7 +286,8 @@ class NTPMonitorManager:
             'start_time': None,
             'log_file': str(self.get_log_file(interface)),
             'pid_file': str(self.get_pid_file(interface)),
-            'interface_exists': self.check_interface_exists(interface)
+            'interface_exists': self.check_interface_exists(interface),
+            'ingestion_target': f"{config.NTP_INGESTION_HOST}:{config.NTP_INGESTION_PORT}"  # 新增：显示数据发送目标
         }
 
         pid = self.get_monitoring_pid(interface)
@@ -328,19 +334,6 @@ class NTPMonitorManager:
             interface = pid_file.stem.replace("ntp_", "")
             monitored_interfaces.add(interface)
             status_list.append(self.get_monitor_status(interface))
-
-        # 可选：如果需要显示系统中存在但未监控的网卡，可以添加以下代码
-        # try:
-        #     result = subprocess.run(['ip', 'link', 'show'], capture_output=True, text=True, timeout=5)
-        #     if result.returncode == 0:
-        #         for line in result.stdout.split('\n'):
-        #             match = re.search(r'^\d+:\s+([^:@]+)', line)
-        #             if match:
-        #                 interface = match.group(1)
-        #                 if interface not in monitored_interfaces and interface != 'lo':
-        #                     status_list.append(self.get_monitor_status(interface))
-        # except Exception as e:
-        #     logger.warning(f"获取系统网卡列表失败: {e}")
 
         return status_list
 
